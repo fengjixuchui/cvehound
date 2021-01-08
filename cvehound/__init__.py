@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 
-import pkg_resources
 import os
 import sys
 import argparse
 import re
 import subprocess
+import gzip
+import json
+from shutil import which
+from subprocess import PIPE
+import pkg_resources
+
+__VERSION__ = '0.2.1-dev'
 
 def dir_path(path):
     if os.path.isdir(path):
         return path
-    else:
-        raise NotADirectoryError(path)
+    raise NotADirectoryError(path)
+
+def tool_exists(name):
+    return which(name) is not None
 
 cores_num = 0
 def get_cores_num():
@@ -41,21 +49,14 @@ def get_grep_pattern(rule):
                 patterns.append(line)
     return (is_fix, patterns)
 
-def get_files(rule, kernel):
-    files = []
-    with open(rule, 'r') as fh:
-        while True:
-            line = fh.readline()
-            if not line:
-                break
-            if 'Files:' in line:
-                files = line.partition('Files:')[2].split()
-                break
-    files = map(lambda f: os.path.join(kernel, f), files)
-    files = filter(lambda f: os.path.exists(f), files)
-    return files
+def read_cve_metadata():
+    cves = pkg_resources.resource_filename('cvehound', 'data/kernel_cves.json.gz')
+    data = None
+    with gzip.open(cves, 'rt', encoding='utf-8') as fh:
+        data = json.loads(fh.read())
+    return data
 
-def check_cve(kernel, cve, verbose=False, all_files=False):
+def check_cve(kernel, cve, info=None, verbose=0, all_files=False):
     cocci = pkg_resources.resource_filename('cvehound', 'cve/' + cve + '.cocci')
     grep = pkg_resources.resource_filename('cvehound', 'cve/' + cve + '.grep')
     is_grep = False
@@ -68,7 +69,10 @@ def check_cve(kernel, cve, verbose=False, all_files=False):
 
     files = []
     if not all_files:
-        files = list(get_files(rule, kernel))
+        files = get_rule_metadata(cve)['files']
+        files = map(lambda f: os.path.join(kernel, f), files)
+        files = filter(lambda f: os.path.exists(f), files)
+        files = list(files)
     if not files:
         files = [ kernel ]
 
@@ -82,47 +86,97 @@ def check_cve(kernel, cve, verbose=False, all_files=False):
             run = subprocess.run(['spatch', '--no-includes', '--include-headers',
                                   '-D', 'detect', '--no-show-diff', '-j', str(get_cores_num()),
                                   '--cocci-file', cocci, *files],
-                                  capture_output=True, check=True)
+                                  stdout=PIPE, stderr=PIPE, check=True)
             output = run.stdout.decode('utf-8')
         else:
             (is_fix, patterns) = get_grep_pattern(grep)
             args = ['grep', '--include=*.[ch]', '-rPzoe', patterns[0], *files]
             patterns.pop(0)
-            run = subprocess.run(args, capture_output=True)
+            run = subprocess.run(args, stdout=PIPE, stderr=PIPE, check=False)
             if run.returncode == 0:
                 output = run.stdout
                 last = patterns.pop()
-                for p in patterns:
-                    run = subprocess.run(['grep', '-Pzoe', p],
-                                         input=output, capture_output=True)
+                for pattern in patterns:
+                    run = subprocess.run(['grep', '-Pzoe', pattern],
+                                         input=output, check=False,
+                                         stdout=PIPE, stderr=PIPE)
                     if run.returncode != 0:
                         output = ''
                         break
                     output = run.stdout
                 if run.returncode == 0:
                     run = subprocess.run(['grep', '-Pzoe', last],
-                                         input=output, capture_output=True)
+                                         input=output, check=False,
+                                         stdout=PIPE, stderr=PIPE)
                     success = run.returncode == 0
                     if is_fix == success:
                         output = ''
                     else:
                         output = 'ERROR'
     except subprocess.CalledProcessError as e:
-        print('Failed to check', cve)
-        if verbose:
-            print('Failed to run:', ' '.join(e.cmd))
+        print('Failed to run:', ' '.join(e.cmd))
         return False
 
     if 'ERROR' in output:
         print('Found:', cve)
         if verbose:
-            print(output)
+            print('MSG:', info['cmt_msg'])
+            if 'cwe' in info:
+                print('CWE:', info['cwe'])
+            if 'last_modified' in info:
+                print('CVE UPDATED:', info['last_modified'])
+            print('https://www.linuxkernelcves.com/cves/' + cve)
+            if verbose > 1:
+                print(output)
+            print()
         return True
     return False
 
+def removesuffix(string, suffix):
+    if suffix and string.endswith(suffix):
+        return string[:-len(suffix)]
+    return string[:]
+
+rules_metadata = {}
+def get_rule_metadata(cve):
+    files = []
+    fix = None
+    fixes = None
+
+    if cve in rules_metadata:
+        return rules_metadata[cve]
+
+    with open(get_all_cves()[cve], 'r') as fh:
+        while True:
+            line = fh.readline()
+            if not line:
+                break
+            if 'Files:' in line:
+                files = line.partition('Files:')[2].split()
+            elif 'Fix:' in line:
+                fix = line.partition('Fix:')[2].strip()
+            elif 'Fixes:' in line:
+                fixes = line.partition('Fixes:')[2].strip()
+                break
+            elif 'Detect-To:' in line:
+                fixes = line.partition('Detect-To:')[2].strip()
+                break
+
+    meta = { 'files': files }
+    if fix:
+        meta['fix'] = fix
+    if fixes:
+        meta['fixes'] = fixes
+    return meta
+
+cve_rules = {}
 def get_all_cves():
-    return [cve.removesuffix('.cocci').removesuffix('.grep')
-            for cve in pkg_resources.resource_listdir('cvehound', 'cve/')]
+    global cve_rules
+    if not cve_rules:
+        for cve in pkg_resources.resource_listdir('cvehound', 'cve/'):
+            name = removesuffix(removesuffix(cve, '.grep'), '.cocci')
+            cve_rules[name] = pkg_resources.resource_filename('cvehound', 'cve/' + cve)
+    return cve_rules
 
 def main(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(
@@ -130,16 +184,22 @@ def main(args=sys.argv[1:]):
         description='A tool to check linux kernel sources dump for known CVEs',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('--version', action='version', version='0.0.1')
-    parser.add_argument('--all-files', action='store_true', help="don't use files hint from cocci rules")
+    parser.add_argument('--version', action='version', version=__VERSION__)
+    parser.add_argument('--all-files', action='store_true',
+                        help="don't use files hint from cocci rules")
     parser.add_argument('--cve', '-c', nargs='+', default='all',
                         help='list of cve identifiers')
     parser.add_argument('--dir', '-d', type=dir_path, required=True,
                         help='linux kernel sources dir')
-    parser.add_argument('-v', '--verbose', help='increase output verbosity',
-                        action='store_true')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                        help='increase output verbosity')
     cmdargs = parser.parse_args()
-    known_cves = get_all_cves()
+
+    if not tool_exists('spatch'):
+        print('Please, install coccinelle.')
+        sys.exit(1)
+
+    known_cves = get_all_cves().keys()
     if cmdargs.cve == 'all':
         cmdargs.cve = known_cves
     else:
@@ -154,8 +214,11 @@ def main(args=sys.argv[1:]):
             if cve not in known_cves:
                 print('Unknown CVE:', cve, file=sys.stderr)
                 sys.exit(1)
+    meta = {}
+    if cmdargs.verbose:
+        meta = read_cve_metadata()
     for cve in cmdargs.cve:
-        check_cve(cmdargs.dir, cve, cmdargs.verbose, cmdargs.all_files)
+        check_cve(cmdargs.dir, cve, meta.get(cve, {}), cmdargs.verbose, cmdargs.all_files)
 
 if __name__ == '__main__':
     main(sys.argv[1:])
