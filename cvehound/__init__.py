@@ -11,7 +11,7 @@ from shutil import which
 from subprocess import PIPE
 import pkg_resources
 
-__VERSION__ = '0.2.1-dev'
+__VERSION__ = '0.2.1'
 
 def dir_path(path):
     if os.path.isdir(path):
@@ -33,10 +33,7 @@ def get_grep_pattern(rule):
     start = False
     patterns = []
     with open(rule, 'r') as fh:
-        while True:
-            line = fh.readline()
-            if not line:
-                break
+        for line in fh:
             line = line.strip()
             if line == 'FIX':
                 is_fix = True
@@ -57,14 +54,9 @@ def read_cve_metadata():
     return data
 
 def check_cve(kernel, cve, info=None, verbose=0, all_files=False):
-    cocci = pkg_resources.resource_filename('cvehound', 'cve/' + cve + '.cocci')
-    grep = pkg_resources.resource_filename('cvehound', 'cve/' + cve + '.grep')
     is_grep = False
-
-    if os.path.isfile(cocci):
-        rule = cocci
-    else:
-        rule = grep
+    rule = get_all_cves()[cve]
+    if rule.endswith('.grep'):
         is_grep = True
 
     files = []
@@ -85,11 +77,11 @@ def check_cve(kernel, cve, info=None, verbose=0, all_files=False):
         if not is_grep:
             run = subprocess.run(['spatch', '--no-includes', '--include-headers',
                                   '-D', 'detect', '--no-show-diff', '-j', str(get_cores_num()),
-                                  '--cocci-file', cocci, *files],
+                                  '--cocci-file', rule, *files],
                                   stdout=PIPE, stderr=PIPE, check=True)
             output = run.stdout.decode('utf-8')
         else:
-            (is_fix, patterns) = get_grep_pattern(grep)
+            (is_fix, patterns) = get_grep_pattern(rule)
             args = ['grep', '--include=*.[ch]', '-rPzoe', patterns[0], *files]
             patterns.pop(0)
             run = subprocess.run(args, stdout=PIPE, stderr=PIPE, check=False)
@@ -146,11 +138,8 @@ def get_rule_metadata(cve):
     if cve in rules_metadata:
         return rules_metadata[cve]
 
-    with open(get_all_cves()[cve], 'r') as fh:
-        while True:
-            line = fh.readline()
-            if not line:
-                break
+    with open(get_all_cves()[cve], 'rt') as fh:
+        for line in fh:
             if 'Files:' in line:
                 files = line.partition('Files:')[2].split()
             elif 'Fix:' in line:
