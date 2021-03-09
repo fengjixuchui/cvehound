@@ -16,7 +16,8 @@ def find_version(source):
 
 test_deps = [
     'pytest',
-    'gitpython'
+    'gitpython',
+    'psutil'
 ]
 extras = {
     'tests': test_deps,
@@ -49,7 +50,8 @@ setup(
     keywords=['cve', 'linux', 'kernel', 'spatch', 'cve-scanning', 'coccinelle'],
     entry_points={
         'console_scripts': [
-            'cvehound=cvehound.__init__:main'
+            'cvehound=cvehound.__main__:main',
+            'cvehound_update_metadata=cvehound.scripts.update_metadata:main'
         ]
     },
     include_package_data=True
