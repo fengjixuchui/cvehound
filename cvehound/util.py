@@ -11,6 +11,11 @@ def dir_path(path):
         return path
     raise NotADirectoryError(path)
 
+def file_path(path):
+    if os.path.isfile(path) or path == '-':
+        return path
+    raise FileNotFoundError(path)
+
 def tool_exists(name):
     return which(name) is not None
 
@@ -18,6 +23,31 @@ def removesuffix(string, suffix):
     if suffix and string.endswith(suffix):
         return string[:-len(suffix)]
     return string[:]
+
+def get_config_data(path):
+    with open(path, 'rt') as fh:
+        ver_pattern = re.compile(r'# Linux/(\S+)\s+(\S+)\s+Kernel Configuration')
+        for line in fh:
+            res = ver_pattern.match(line)
+            if res:
+                return {'arch': res.group(1), 'version': res.group(2)}
+    return {}
+
+def get_kernel_version(path):
+    version = {}
+    with open(os.path.join(path, 'Makefile'), 'rt') as fh:
+        def getparam():
+            line = fh.readline()
+            if line.startswith('#'):
+                line = fh.readline()
+            return line.split('=')[1].strip()
+        version['version'] = getparam()
+        version['patchlevel'] = getparam()
+        version['sublevel'] = getparam()
+        version['extraversion'] = getparam()
+        version['name'] = getparam()
+    version['full'] = '.'.join([version['version'], version['patchlevel'], version['sublevel']]) + version['extraversion']
+    return version
 
 def get_cvehound_version():
     version = pkg_resources.get_distribution('cvehound').version
@@ -53,5 +83,5 @@ def get_cves_metadata():
     cves = pkg_resources.resource_filename('cvehound', 'data/kernel_cves.json.gz')
     data = None
     with gzip.open(cves, 'rt', encoding='utf-8') as fh:
-        data = json.loads(fh.read())
+        data = json.load(fh)
     return data

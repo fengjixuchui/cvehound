@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.5]
+        python-version: [3.6]
         os: [ubuntu-latest]
         ocaml-version: [4.07.1]
         coccinelle-version: [system, 1.0.7, 1.0.8, 1.0.9, 1.1.0, git]
@@ -93,6 +93,10 @@ jobs:
         ./configure --enable-python --enable-ocaml --enable-pcre-syntax --enable-pcre --enable-opt --disable-bytes
         make
         sudo make install
+
+    - name: Spatch Version
+      run: |
+        which opam >/dev/null 2>&1 && eval $(opam env)
         spatch --version
 
     - name: Install CVEhound

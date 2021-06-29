@@ -8,16 +8,22 @@ import subprocess
 import logging
 from subprocess import PIPE
 import pkg_resources
+import collections
+from datetime import datetime
+from sympy.logic import simplify_logic
+from sympy import symbols
 from cvehound.cpu import CPU
 from cvehound.exception import UnsupportedVersion
 from cvehound.util import get_spatch_version, get_all_cves, get_cves_metadata
+from cvehound.kbuild import KbuildParser
+from cvehound.config import Config
 
-__VERSION__ = '0.2.1'
+__VERSION__ = '1.0.2'
 
 
 class CVEhound:
 
-    def __init__(self, kernel):
+    def __init__(self, kernel, config=None, arch='x86'):
         self.kernel = kernel
         self.metadata = get_cves_metadata()
         self.cocci_job = str(CPU().get_cocci_jobs())
@@ -26,10 +32,10 @@ class CVEhound:
         self.cve_rules = get_all_cves()
 
         ipaths = [
-            'arch/x86/include',
-            'arch/x86/include/generated',
-            'arch/x86/include/uapi',
-            'arch/x86/include/generated/uapi',
+            os.path.join('arch', arch, 'include'),
+            os.path.join('arch', arch, 'include/generated'),
+            os.path.join('arch', arch, 'include/uapi'),
+            os.path.join('arch', arch, 'include/generated/uapi'),
             'include',
             'include/uapi',
             'include/generated/uapi'
@@ -41,11 +47,32 @@ class CVEhound:
             includes.append(i)
         self.includes = includes
 
+        if config:
+            parser = KbuildParser(None, arch)
+            dirs_to_process = collections.OrderedDict()
+            parser.init_class.process(parser, dirs_to_process, kernel)
+
+            for item in dirs_to_process:
+                descend = parser.init_class.get_file_for_subdirectory(item)
+                parser.process_kbuild_or_makefile(descend, dirs_to_process[item])
+
+            self.config_map = parser.get_config()
+            if config != '-':
+                self.config_file = config
+                self.config = Config(config)
+            else:
+                self.config_file = None
+                self.config = None
+        else:
+            self.config_file = None
+            self.config_map = None
+            self.config = None
+
     def get_grep_pattern(self, rule):
         is_fix = False
         start = False
         patterns = []
-        with open(rule, 'r') as fh:
+        with open(rule, 'rt') as fh:
             for line in fh:
                 line = line.strip()
                 if line == 'FIX':
@@ -60,6 +87,7 @@ class CVEhound:
         return (is_fix, patterns)
 
     def check_cve(self, cve, all_files=False):
+        result = {}
         is_grep = False
         rule = self.cve_rules[cve]
         if rule.endswith('.grep'):
@@ -98,7 +126,7 @@ class CVEhound:
                 logging.debug(' '.join(cocci_cmd))
 
                 run = subprocess.run(cocci_cmd, stdout=PIPE, stderr=PIPE, check=True)
-                output = run.stdout.decode('utf-8')
+                output = run.stdout.decode('utf-8').strip()
             except subprocess.CalledProcessError as e:
                 err = e.stderr.decode('utf-8').split('\n')[-2]
                 # Coccinelle 1.0.4 bug workaround
@@ -134,16 +162,60 @@ class CVEhound:
             logging.warning('Found: ' + cve)
             if cve in self.metadata:
                 info = self.metadata[cve]
+                result = info
                 if 'cmt_msg' in info:
                     logging.info('MSG: ' + info['cmt_msg'])
                 if 'cwe' in info:
                     logging.info('CWE: ' + info['cwe'])
-                if 'last_modified' in info:
-                    logging.info('CVE UPDATED: ' + info['last_modified'])
+                if 'fix_date' in info:
+                    logging.info('FIX DATE: ' + str(datetime.utcfromtimestamp(info['fix_date'])))
             logging.info('https://www.linuxkernelcves.com/cves/' + cve)
+            if self.config_map:
+                result['config'] = {}
+                config_affected = None
+                files = {}
+                for line in output.split('\n'):
+                    file = line.split(':')[0]
+                    files[file] = self.config_map.get(file, '')
+                if files:
+                    logging.info('Affected Files:')
+                    for file, config in files.items():
+                        result['config'][file] = {}
+                        if config:
+                            config = simplify_logic(config)
+                            result['config'][file]['logic'] = str(config)
+                            if self.config:
+                                affected = config.subs(self.config.get_mapping())
+                                if affected == True:
+                                    affected = 'affected'
+                                    result['config'][file]['config'] = True
+                                    config_affected = True
+                                else:
+                                    affected = 'not affected'
+                                    result['config'][file]['config'] = False
+                                    if config_affected == None:
+                                        config_affected = False
+                                logging.info(' - ' + file + ': ' + str(config) + '\n   ' + self.config_file + ': ' + affected)
+                            else:
+                                logging.info(' - ' + file + ': ' + str(config))
+                        elif not file.endswith('.h'): # TODO: if only .h file, e.g. linux/kernel.h?
+                            result['config'][file]['logic'] = True
+                            result['config'][file]['config'] = True
+                            config_affected = True
+                            logging.info(' - ' + file + ': True')
+                result['config']['affected'] = config_affected
+                if config_affected != None:
+                    affected = 'affected'
+                    if not config_affected:
+                        affected = 'not affected'
+                    if self.config:
+                        logging.info('Config: ' + self.config_file + ' ' + affected)
+                    else:
+                        logging.info('Config: any ' + affected)
+            result['spatch_output'] = output
             logging.debug(output)
             logging.info('')
-            return True
+            return result
         return False
 
     def get_rule_metadata(self, cve):
